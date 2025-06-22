@@ -1,0 +1,1 @@
+This repository contains code files used to generate results in the manuscript "Individual movements drive community-level space and resource use across Yellowstone ungulates" by Molly R. Caldwell, Chris Geremia, Daniel R. Stahler, Daniel R. MacNulty, Douglas W. Smith, and Jerod A. Merkle. Associated data files are at https://doi.org/10.5061/dryad.d2547d8cm
