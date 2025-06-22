@@ -1,0 +1,1623 @@
+---
+title: "YNP Ungulates: hypervolume metrics bayesian models"
+author: "Molly Caldwell"
+date: "22 June 2025"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(rstan)
+library(brms)
+library(tidybayes)
+library(modelr)
+```
+
+# Load data
+Load in metrics calculated in hypervolume code Step 3.
+
+```{r}
+# load metrics of specialization, nestedness, and clustering
+spec_data <- readRDS("./individual_specialization_indices.rds")
+
+nest_data_pop <- readRDS("./population_nestedness.rds")
+
+nest_data_comm <- readRDS("./community_nestedness.rds")
+
+clust_data <- readRDS("./clustering_metrics.rds")
+
+```
+
+```{r}
+# set clustering indices as numeric and set NA species to "ALL"
+clust_data <- clust_data %>% 
+  mutate(clust_ind_move = as.numeric(clust_ind_move),
+         clust_ind_res = as.numeric(clust_ind_res)) %>% 
+  mutate(species = if_else(species == "NA", "All species", species)) %>% 
+  mutate(species = factor(species, levels = c("Bighorn sh.", "Bison", "Elk", 
+                                              "Mule deer",
+                                              "Pronghorn", "All species")))
+```
+
+# Differences across species
+Bayesian linear models for each hypervolume metric (per move and resource hypervolumes and per population and community level)
+
+## Specialization
+### Species differences- community level
+
+```{r}
+# movement hypervolumes
+# get priors
+spec_priors_spp_move_comm <- get_prior(spec_move_comm ~ species,
+                        data = spec_data)
+
+# run model
+spec_model_spp_move_comm <- brm(spec_move_comm ~ species,
+                        data = spec_data, prior = spec_priors_spp_move_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+# extract posteriors
+post_spec_spp_move_comm <- as_draws_df(spec_model_spp_move_comm)
+
+# resource hypervolumes
+# get priors
+spec_priors_spp_res_comm <- get_prior(spec_res_comm ~ species,
+                        data = spec_data)
+
+# run model
+spec_model_spp_res_comm <- brm(spec_res_comm ~ species,
+                        data = spec_data, prior = spec_priors_spp_res_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+# extract posteriors
+post_spec_spp_res_comm <- as_draws_df(spec_model_spp_res_comm)
+```
+
+```{r}
+# reformat and combine movement and resource hypervolume specialization posterior estimates
+# move posteriors
+# first, calculate mean estimates per species
+post_spec_spp_move_comm <- post_spec_spp_move_comm %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+# then, put data in long format
+ post_spec_spp_move_comm <- post_spec_spp_move_comm %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+# resource posteriors
+# first, calculate mean estimates per species
+post_spec_spp_res_comm <- post_spec_spp_res_comm %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+# then, put data in long format
+ post_spec_spp_res_comm <- post_spec_spp_res_comm %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Resource") #specify type of hypervolume
+
+
+# now, combine resource and movement posteriors to one dataset
+spec_comm_spp_post <- rbind(post_spec_spp_move_comm, post_spec_spp_res_comm)
+```
+
+### Seasonal differences within species- community level
+
+```{r}
+# specialization models- seasonal differences within species
+# movement hypervolume models
+spp <- unique(spec_data$species)
+seas_spec_mod_move_comm <- list()
+seas_spec_post_move_comm <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_move_comm ~ season,
+                        data = dat)
+
+#run model
+seas_spec_mod_move_comm[[i]] <- brm(spec_move_comm ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_spec_mod_move_comm) <- spp #add spp names
+
+# extract posteriors
+seas_spec_post_move_comm <- list()
+for(i in 1:length(seas_spec_mod_move_comm)){
+  seas_spec_post_move_comm[[i]] <- as_draws_df(seas_spec_mod_move_comm[[i]])
+  seas_spec_post_move_comm[[i]]$species = spp[i]
+}
+
+seas_spec_post_move_comm <- bind_rows(seas_spec_post_move_comm[1:5])
+
+# resource hypervolume models
+seas_spec_mod_res_comm <- list()
+seas_spec_post_res_comm <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_res_comm ~ season,
+                        data = dat)
+
+#run model
+seas_spec_mod_res_comm[[i]] <- brm(spec_res_comm ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_spec_mod_res_comm) <- spp #add spp names
+
+#extract posteriors
+seas_spec_post_res_comm <- list()
+for(i in 1:length(seas_spec_mod_res_comm)){
+  seas_spec_post_res_comm[[i]] <- as_draws_df(seas_spec_mod_res_comm[[i]])
+  seas_spec_post_res_comm[[i]]$species = spp[i]
+}
+
+seas_spec_post_res_comm <- bind_rows(seas_spec_post_res_comm[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume specialization posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+seas_spec_post_move_comm <- seas_spec_post_move_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_spec_post_move_comm <- seas_spec_post_move_comm %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+#reformat resource posteriors
+#first, calculate mean estimates per species
+seas_spec_post_res_comm <- seas_spec_post_res_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_spec_post_res_comm <- seas_spec_post_res_comm %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+spec_comm_seas_post <- rbind(seas_spec_post_move_comm, seas_spec_post_res_comm)
+```
+
+### Yearly differences within species- community level
+
+```{r}
+#specialization models- yearly differences within species
+#movement hypervolume models
+spp <- unique(spec_data$species)
+yr_spec_mod_move_comm <- list()
+yr_spec_post_move_comm <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_move_comm ~ year,
+                        data = dat)
+
+#run model
+yr_spec_mod_move_comm[[i]] <- brm(spec_move_comm ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_spec_mod_move_comm) <- spp #add spp names
+
+#extract posteriors
+yr_spec_post_move_comm <- list()
+for(i in 1:length(yr_spec_mod_move_comm)){
+  yr_spec_post_move_comm[[i]] <- as_draws_df(yr_spec_mod_move_comm[[i]])
+  yr_spec_post_move_comm[[i]]$species = spp[i]
+}
+
+yr_spec_post_move_comm <- bind_rows(yr_spec_post_move_comm[1:5])
+
+#resource hypervolume models
+yr_spec_mod_res_comm <- list()
+yr_spec_post_res_comm <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_res_comm ~ year,
+                        data = dat)
+
+#run model
+yr_spec_mod_res_comm[[i]] <- brm(spec_res_comm ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_spec_mod_res_comm) <- spp #add spp names
+
+#extract posteriors
+yr_spec_post_res_comm <- list()
+for(i in 1:length(yr_spec_mod_res_comm)){
+  yr_spec_post_res_comm[[i]] <- as_draws_df(yr_spec_mod_res_comm[[i]])
+  yr_spec_post_res_comm[[i]]$species = spp[i]
+}
+
+yr_spec_post_res_comm <- bind_rows(yr_spec_post_res_comm[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+yr_spec_post_move_comm <- yr_spec_post_move_comm %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+    
+#then, put data in long format
+yr_spec_post_move_comm <- yr_spec_post_move_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+yr_spec_post_res_comm <- yr_spec_post_res_comm %>% 
+        mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_spec_post_res_comm <- yr_spec_post_res_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+spec_comm_yr_post <- rbind(yr_spec_post_move_comm, yr_spec_post_res_comm)
+```
+
+### Species differences- population level
+
+```{r}
+#population-level
+#specialization models- species differences
+
+#movement hypervolumes
+#get priors
+spec_priors_spp_move_pop <- get_prior(spec_move_pop ~ species,
+                        data = spec_data)
+
+#run model
+spec_model_spp_move_pop <- brm(spec_move_pop ~ species,
+                        data = spec_data, prior = spec_priors_spp_move_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_spec_spp_move_pop <- as_draws_df(spec_model_spp_move_pop)
+
+#resource hypervolumes
+#get priors
+spec_priors_spp_res_pop <- get_prior(spec_res_pop ~ species,
+                        data = spec_data)
+
+#run model
+spec_model_spp_res_pop <- brm(spec_res_pop ~ species,
+                        data = spec_data, prior = spec_priors_spp_res_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_spec_spp_res_pop <- as_draws_df(spec_model_spp_res_pop)
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+post_spec_spp_move_pop <- post_spec_spp_move_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_spec_spp_move_pop <- post_spec_spp_move_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+post_spec_spp_res_pop <- post_spec_spp_res_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_spec_spp_res_pop <- post_spec_spp_res_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Resource") #specify type of hypervolume
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+spec_pop_spp_post <- rbind(post_spec_spp_move_pop, post_spec_spp_res_pop)
+```
+
+### Seasonal differences within species- population level
+
+```{r}
+#specialization models- seasonal differences within species
+#movement hypervolume models
+spp <- unique(spec_data$species)
+seas_spec_mod_move_pop <- list()
+seas_spec_post_move_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_move_pop ~ season,
+                        data = dat)
+
+#run model
+seas_spec_mod_move_pop[[i]] <- brm(spec_move_pop ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_spec_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+seas_spec_post_move_pop <- list()
+for(i in 1:length(seas_spec_mod_move_pop)){
+  seas_spec_post_move_pop[[i]] <- as_draws_df(seas_spec_mod_move_pop[[i]])
+  seas_spec_post_move_pop[[i]]$species = spp[i]
+}
+
+seas_spec_post_move_pop <- bind_rows(seas_spec_post_move_pop[1:5])
+
+#resource hypervolume models
+seas_spec_mod_res_pop <- list()
+seas_spec_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_res_pop ~ season,
+                        data = dat)
+
+#run model
+seas_spec_mod_res_pop[[i]] <- brm(spec_res_pop ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_spec_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+seas_spec_post_res_pop <- list()
+for(i in 1:length(seas_spec_mod_res_pop)){
+  seas_spec_post_res_pop[[i]] <- as_draws_df(seas_spec_mod_res_pop[[i]])
+  seas_spec_post_res_pop[[i]]$species = spp[i]
+}
+
+seas_spec_post_res_pop <- bind_rows(seas_spec_post_res_pop[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+seas_spec_post_move_pop <- seas_spec_post_move_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_spec_post_move_pop <- seas_spec_post_move_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+seas_spec_post_res_pop <- seas_spec_post_res_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_spec_post_res_pop <- seas_spec_post_res_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+spec_pop_seas_post <- rbind(seas_spec_post_move_pop, seas_spec_post_res_pop)
+```
+
+### Yearly differences- population level
+
+```{r}
+#specialization models- yearly differences within species
+#movement hypervolume models
+spp <- unique(spec_data$species)
+yr_spec_mod_move_pop <- list()
+yr_spec_post_move_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_move_pop ~ year,
+                        data = dat)
+
+#run model
+yr_spec_mod_move_pop[[i]] <- brm(spec_move_pop ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_spec_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+yr_spec_post_move_pop <- list()
+for(i in 1:length(yr_spec_mod_move_pop)){
+  yr_spec_post_move_pop[[i]] <- as_draws_df(yr_spec_mod_move_pop[[i]])
+  yr_spec_post_move_pop[[i]]$species = spp[i]
+}
+
+yr_spec_post_move_pop <- bind_rows(yr_spec_post_move_pop[1:5])
+
+#resource hypervolume models
+yr_spec_mod_res_pop <- list()
+yr_spec_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- spec_data %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(spec_res_pop ~ year,
+                        data = dat)
+
+#run model
+yr_spec_mod_res_pop[[i]] <- brm(spec_res_pop ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_spec_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+yr_spec_post_res_pop <- list()
+for(i in 1:length(yr_spec_mod_res_pop)){
+  yr_spec_post_res_pop[[i]] <- as_draws_df(yr_spec_mod_res_pop[[i]])
+  yr_spec_post_res_pop[[i]]$species = spp[i]
+}
+
+yr_spec_post_res_pop <- bind_rows(yr_spec_post_res_pop[1:5])
+```
+
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+yr_spec_post_move_pop <- yr_spec_post_move_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_spec_post_move_pop <- yr_spec_post_move_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+yr_spec_post_res_pop <- yr_spec_post_res_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_spec_post_res_pop <- yr_spec_post_res_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+spec_pop_yr_post <- rbind(yr_spec_post_move_pop, yr_spec_post_res_pop)
+```
+
+
+## Nestedness
+### Species differences- community level
+
+```{r}
+#community-level
+#nestedness models- species differences
+
+#movement hypervolumes
+nest_comm_m <- nest_data_comm %>% filter(type == "move")
+
+#get priors
+nest_priors_spp_move_comm <- get_prior(NI_comm ~ species,
+                        data = nest_comm_m)
+
+#run model
+nest_model_spp_move_comm <- brm(NI_comm ~ species,
+                        data = nest_comm_m, prior = nest_priors_spp_move_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_nest_spp_move_comm <- as_draws_df(nest_model_spp_move_comm)
+
+#resource hypervolumes
+nest_comm_r <- nest_data_comm %>% filter(type == "res")
+#get priors
+nest_priors_spp_res_comm <- get_prior(NI_comm ~ species,
+                        data = nest_comm_r)
+
+#run model
+nest_model_spp_res_comm <- brm(NI_comm ~ species,
+                        data = nest_comm_r, prior = nest_priors_spp_res_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_nest_spp_res_comm <- as_draws_df(nest_model_spp_res_comm)
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume nest posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per nesties
+post_nest_spp_move_comm <- post_nest_spp_move_comm %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_nest_spp_move_comm <- post_nest_spp_move_comm %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Movement") #nestify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+post_nest_spp_res_comm <- post_nest_spp_res_comm %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_nest_spp_res_comm <- post_nest_spp_res_comm %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Resource") #nestify type of hypervolume
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_comm_spp_post <- rbind(post_nest_spp_move_comm, post_nest_spp_res_comm)
+```
+
+
+### Seasonal differences within species- community level
+
+```{r}
+#nestedness models- seasonal differences within species
+# add season to nestedness
+nest_data_comm <- nest_data_comm %>% 
+  mutate(season = str_split_i(id1, "_", 3))
+
+#movement hypervolume models
+spp <- unique(nest_data_comm$species)
+seas_nest_mod_move_comm <- list()
+seas_nest_post_move_comm <- list()
+
+for(i in 1:length(spp)){
+  dat_m <- nest_data_comm %>% filter(species == spp[i] & type == "move")
+  
+  #get priors
+priors <- get_prior(NI_comm ~ season,
+                        data = dat_m)
+
+#run model
+seas_nest_mod_move_comm[[i]] <- brm(NI_comm ~ season,
+                        data = dat_m, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_nest_mod_move_comm) <- spp #add spp names
+
+#extract posteriors
+seas_nest_post_move_comm <- list()
+for(i in 1:length(seas_nest_mod_move_comm)){
+  seas_nest_post_move_comm[[i]] <- as_draws_df(seas_nest_mod_move_comm[[i]])
+  seas_nest_post_move_comm[[i]]$species = spp[i]
+}
+
+seas_nest_post_move_comm <- bind_rows(seas_nest_post_move_comm[1:5])
+
+#resource hypervolume models
+seas_nest_mod_res_comm <- list()
+seas_nest_post_res_comm <- list()
+
+for(i in 1:length(spp)){
+  dat_r <- nest_data_comm %>% filter(species == spp[i] & type == "res")
+  
+  #get priors
+priors <- get_prior(NI_comm ~ season,
+                        data = dat_r)
+
+#run model
+seas_nest_mod_res_comm[[i]] <- brm(NI_comm ~ season,
+                        data = dat_r, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_nest_mod_res_comm) <- spp #add spp names
+
+#extract posteriors
+seas_nest_post_res_comm <- list()
+for(i in 1:length(seas_nest_mod_res_comm)){
+  seas_nest_post_res_comm[[i]] <- as_draws_df(seas_nest_mod_res_comm[[i]])
+  seas_nest_post_res_comm[[i]]$species = spp[i]
+}
+
+seas_nest_post_res_comm <- bind_rows(seas_nest_post_res_comm[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume nest posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per nesties
+seas_nest_post_move_comm <- seas_nest_post_move_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_nest_post_move_comm <- seas_nest_post_move_comm %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #nestify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per nesties
+seas_nest_post_res_comm <- seas_nest_post_res_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_nest_post_res_comm <- seas_nest_post_res_comm %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_comm_seas_post <- rbind(seas_nest_post_move_comm, seas_nest_post_res_comm)
+```
+
+### Yearly differences within species- community level
+
+```{r}
+#nestedness models- yearly differences within species
+#movement hypervolume models
+spp <- unique(nest_data_comm$species)
+yr_nest_mod_move_comm <- list()
+yr_nest_post_move_comm <- list()
+
+# add year to data
+nest_data_comm <- nest_data_comm %>% 
+  mutate(year = str_split_i(id1, "_", 2))
+
+for(i in 1:length(spp)){
+  dat_m <- nest_data_comm %>% filter(species == spp[i] & type == "move")
+  
+  #get priors
+priors <- get_prior(NI_comm ~ year,
+                        data = dat_m)
+
+#run model
+yr_nest_mod_move_comm[[i]] <- brm(NI_comm ~ year,
+                        data = dat_m, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_nest_mod_move_comm) <- spp #add spp names
+
+#extract posteriors
+yr_nest_post_move_comm <- list()
+for(i in 1:length(yr_nest_mod_move_comm)){
+  yr_nest_post_move_comm[[i]] <- as_draws_df(yr_nest_mod_move_comm[[i]])
+  yr_nest_post_move_comm[[i]]$species = spp[i]
+}
+
+yr_nest_post_move_comm <- bind_rows(yr_nest_post_move_comm[1:5])
+
+#resource hypervolume models
+yr_nest_mod_res_comm <- list()
+yr_nest_post_res_comm <- list()
+
+for(i in 1:length(spp)){
+  dat_r <- nest_data_comm %>% filter(species == spp[i] & type == "res")
+  
+  #get priors
+priors <- get_prior(NI_comm ~ year,
+                        data = dat_r)
+
+#run model
+yr_nest_mod_res_comm[[i]] <- brm(NI_comm ~ year,
+                        data = dat_r, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_nest_mod_res_comm) <- spp #add spp names
+
+#extract posteriors
+yr_nest_post_res_comm <- list()
+for(i in 1:length(yr_nest_mod_res_comm)){
+  yr_nest_post_res_comm[[i]] <- as_draws_df(yr_nest_mod_res_comm[[i]])
+  yr_nest_post_res_comm[[i]]$species = spp[i]
+}
+
+yr_nest_post_res_comm <- bind_rows(yr_nest_post_res_comm[1:5])
+```
+
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+yr_nest_post_move_comm <- yr_nest_post_move_comm %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_nest_post_move_comm <- yr_nest_post_move_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+yr_nest_post_res_comm <- yr_nest_post_res_comm %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_nest_post_res_comm <- yr_nest_post_res_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_comm_yr_post <- rbind(yr_nest_post_move_comm, yr_nest_post_res_comm)
+```
+
+### Species differences- population level
+
+```{r}
+#population-level
+#nestedness models- species differences
+nest_pop_m <- nest_data_pop %>% filter(type == "move")
+  
+#movement hypervolumes
+#get priors
+nest_priors_spp_move_pop <- get_prior(NI_pop ~ species,
+                        data = nest_pop_m)
+
+#run model
+nest_model_spp_move_pop <- brm(NI_pop ~ species,
+                        data = nest_pop_m, prior = nest_priors_spp_move_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_nest_spp_move_pop <- as_draws_df(nest_model_spp_move_pop)
+
+#resource hypervolumes
+nest_pop_r <- nest_data_pop %>% filter(type == "res")
+#get priors
+nest_priors_spp_res_pop <- get_prior(NI_pop ~ species,
+                        data = nest_pop_r)
+
+#run model
+nest_model_spp_res_pop <- brm(NI_pop ~ species,
+                        data = nest_pop_r, prior = nest_priors_spp_res_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_nest_spp_res_pop <- as_draws_df(nest_model_spp_res_pop)
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume nest posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per nesties
+post_nest_spp_move_pop <- post_nest_spp_move_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_nest_spp_move_pop <- post_nest_spp_move_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Movement") #nestify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+post_nest_spp_res_pop <- post_nest_spp_res_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_nest_spp_res_pop <- post_nest_spp_res_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Resource") #nestify type of hypervolume
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_pop_spp_post <- rbind(post_nest_spp_move_pop, post_nest_spp_res_pop)
+```
+
+### Seasonal differences within species- population level
+
+```{r}
+#nestedness models- seasonal differences within species
+#movement hypervolume models
+spp <- unique(nest_data_pop$species)
+seas_nest_mod_move_pop <- list()
+seas_nest_post_move_pop <- list()
+
+nest_data_pop <- nest_data_pop %>% 
+  mutate(season = str_split_i(id1, "_", 3))
+
+for(i in 1:length(spp)){
+  dat_m <- nest_data_pop %>% filter(species == spp[i] & type == "move")
+  
+  #get priors
+priors <- get_prior(NI_pop ~ season,
+                        data = dat_m)
+
+#run model
+seas_nest_mod_move_pop[[i]] <- brm(NI_pop ~ season,
+                        data = dat_m, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_nest_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+seas_nest_post_move_pop <- list()
+for(i in 1:length(seas_nest_mod_move_pop)){
+  seas_nest_post_move_pop[[i]] <- as_draws_df(seas_nest_mod_move_pop[[i]])
+  seas_nest_post_move_pop[[i]]$species = spp[i]
+}
+
+seas_nest_post_move_pop <- bind_rows(seas_nest_post_move_pop[1:5])
+
+#resource hypervolume models
+seas_nest_mod_res_pop <- list()
+seas_nest_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat_r <- nest_data_pop %>% filter(species == spp[i], type == "res")
+  
+  #get priors
+priors <- get_prior(NI_pop ~ season,
+                        data = dat_r)
+
+#run model
+seas_nest_mod_res_pop[[i]] <- brm(NI_pop ~ season,
+                        data = dat_r, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_nest_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+seas_nest_post_res_pop <- list()
+for(i in 1:length(seas_nest_mod_res_pop)){
+  seas_nest_post_res_pop[[i]] <- as_draws_df(seas_nest_mod_res_pop[[i]])
+  seas_nest_post_res_pop[[i]]$species = spp[i]
+}
+
+seas_nest_post_res_pop <- bind_rows(seas_nest_post_res_pop[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume nest posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+seas_nest_post_move_pop <- seas_nest_post_move_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_nest_post_move_pop <- seas_nest_post_move_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per nesties
+seas_nest_post_res_pop <- seas_nest_post_res_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_nest_post_res_pop <- seas_nest_post_res_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_pop_seas_post <- rbind(seas_nest_post_move_pop, seas_nest_post_res_pop)
+```
+
+### Yearly differences within species- population level
+
+```{r}
+#nestedness models- yearly differences within species
+#movement hypervolume models
+spp <- unique(nest_data_pop$species)
+yr_nest_mod_move_pop <- list()
+yr_nest_post_move_pop <- list()
+
+nest_data_pop <- nest_data_pop %>% 
+  mutate(year = str_split_i(id1, "_", 2))
+
+for(i in 1:length(spp)){
+  dat_m <- nest_data_pop %>% filter(species == spp[i] & type == "move")
+  
+  #get priors
+priors <- get_prior(NI_pop ~ year,
+                        data = dat_m)
+
+#run model
+yr_nest_mod_move_pop[[i]] <- brm(NI_pop ~ year,
+                        data = dat_m, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_nest_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+yr_nest_post_move_pop <- list()
+for(i in 1:length(yr_nest_mod_move_pop)){
+  yr_nest_post_move_pop[[i]] <- as_draws_df(yr_nest_mod_move_pop[[i]])
+  yr_nest_post_move_pop[[i]]$species = spp[i]
+}
+
+yr_nest_post_move_pop <- bind_rows(yr_nest_post_move_pop[1:5])
+
+#resource hypervolume models
+yr_nest_mod_res_pop <- list()
+yr_nest_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat_r <- nest_data_pop %>% filter(species == spp[i] & type == "res")
+  
+  #get priors
+priors <- get_prior(NI_pop ~ year,
+                        data = dat_r)
+
+#run model
+yr_nest_mod_res_pop[[i]] <- brm(NI_pop ~ year,
+                        data = dat_r, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_nest_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+yr_nest_post_res_pop <- list()
+for(i in 1:length(yr_nest_mod_res_pop)){
+  yr_nest_post_res_pop[[i]] <- as_draws_df(yr_nest_mod_res_pop[[i]])
+  yr_nest_post_res_pop[[i]]$species = spp[i]
+}
+
+yr_nest_post_res_pop <- bind_rows(yr_nest_post_res_pop[1:5])
+```
+
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+yr_nest_post_move_pop <- yr_nest_post_move_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", 
+                                            "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept +
+                               b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_nest_post_move_pop <- yr_nest_post_move_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+yr_nest_post_res_pop <- yr_nest_post_res_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_nest_post_res_pop <- yr_nest_post_res_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+nest_pop_yr_post <- rbind(yr_nest_post_move_pop, yr_nest_post_res_pop)
+```
+
+
+## Clustering
+
+### Community-level- seasonal differences
+
+```{r}
+#create community cluster dataset
+clust_data_comm <- clust_data %>% filter(type == "comm")
+#movement hypervolumes
+#get priors
+clust_priors_seas_move_comm <- get_prior(clust_ind_move ~ season,
+                        data = clust_data_comm)
+
+#run model
+clust_model_seas_move_comm <- brm(clust_ind_move ~ season,
+                        data = clust_data_comm, prior = clust_priors_seas_move_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_seas_move_comm <- as_draws_df(clust_model_seas_move_comm)
+
+#resource hypervolumes
+#get priors
+clust_priors_seas_res_comm <- get_prior(clust_ind_res ~ season,
+                        data = clust_data_comm)
+
+#run model
+clust_model_seas_res_comm <- brm(clust_ind_res ~ season,
+                        data = clust_data_comm, prior = clust_priors_seas_res_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_seas_res_comm <- as_draws_df(clust_model_seas_res_comm)
+
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume clust posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+post_clust_seas_move_comm <- post_clust_seas_move_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+post_clust_seas_move_comm_l <- post_clust_seas_move_comm %>% 
+  select(Spring, Summer, Winter, Fall) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per nesties
+post_clust_seas_res_comm <- post_clust_seas_res_comm %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+post_clust_seas_res_comm_l <- post_clust_seas_res_comm %>% 
+  select(Spring, Summer, Winter, Fall) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") #specify type of hypervolume
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+clust_comm_seas_post <- rbind(post_clust_seas_move_comm_l, post_clust_seas_res_comm_l)
+```
+
+
+```{r}
+#average across seasonal posteriors for 1 community-level cluster average
+clust_comm_avg_move <- post_clust_seas_move_comm %>% 
+  select(Fall, Spring, Summer, Winter) %>% 
+  rowwise() %>% 
+  mutate(avg = mean(c(Fall, Spring, Summer, Winter))) %>% 
+  mutate(type = "Movement") %>% 
+  select(avg, type)
+
+clust_comm_avg_res <- post_clust_seas_res_comm %>% 
+  select(Fall, Spring, Summer, Winter) %>% 
+  rowwise() %>% 
+  mutate(avg = mean(c(Fall, Spring, Summer, Winter))) %>% 
+  mutate(type = "Resource") %>% 
+  select(avg, type)
+
+clust_comm_avg <- bind_rows(clust_comm_avg_move, clust_comm_avg_res)
+
+#add 'all species' label for plotting
+clust_comm_avg$name = "All species"
+```
+
+### Yearly differences- community level
+
+```{r}
+#clustering models- yearly differences within species
+#movement hypervolume models
+#movement hypervolumes
+#get priors
+clust_priors_yr_move_comm <- get_prior(clust_ind_move ~ year,
+                        data = clust_data_comm)
+
+#run model
+clust_model_yr_move_comm <- brm(clust_ind_move ~ year,
+                        data = clust_data_comm, prior = clust_priors_yr_move_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_yr_move_comm <- as_draws_df(clust_model_yr_move_comm)
+
+#resource hypervolumes
+#get priors
+clust_priors_yr_res_comm <- get_prior(clust_ind_res ~ year,
+                        data = clust_data_comm)
+
+#run model
+clust_model_yr_res_comm <- brm(clust_ind_res ~ year,
+                        data = clust_data_comm, prior = clust_priors_yr_res_comm,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_yr_res_comm <- as_draws_df(clust_model_yr_res_comm)
+```
+
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+post_clust_yr_move_comm <- post_clust_yr_move_comm %>% 
+  mutate(yr_2017 = b_Intercept + b_year2017,
+         yr_2018 = b_Intercept + b_year2018,
+         yr_2019 = b_Intercept + b_year2019,
+         yr_2020 = b_Intercept + b_year2020,
+         yr_2021 = b_Intercept + b_year2021) %>% 
+  rename(yr_2016 = b_Intercept)
+
+#then, put data in long format
+post_clust_yr_move_comm <- post_clust_yr_move_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+post_clust_yr_res_comm <- post_clust_yr_res_comm %>% 
+  mutate(yr_2017 = b_Intercept + b_year2017,
+         yr_2018 = b_Intercept + b_year2018,
+         yr_2019 = b_Intercept + b_year2019,
+         yr_2020 = b_Intercept + b_year2020,
+         yr_2021 = b_Intercept + b_year2021) %>% 
+  rename(yr_2016 = b_Intercept)
+
+#then, put data in long format
+post_clust_yr_res_comm <- post_clust_yr_res_comm %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+clust_comm_yr_post <- rbind(post_clust_yr_move_comm, post_clust_yr_res_comm)
+```
+
+### Population-level- species differences
+
+```{r}
+#create population level clustering dataset
+clust_data_pop <- clust_data %>% filter(type == "pop")
+#population-level
+#clustering models- species differences
+
+#movement hypervolumes
+#get priors
+clust_priors_spp_move_pop <- get_prior(clust_ind_move ~ species,
+                        data = clust_data_pop)
+
+#run model
+clust_model_spp_move_pop <- brm(clust_ind_move ~ species,
+                        data = clust_data_pop, prior = clust_priors_spp_move_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_spp_move_pop <- as_draws_df(clust_model_spp_move_pop)
+
+#resource hypervolumes
+#get priors
+clust_priors_spp_res_pop <- get_prior(clust_ind_res ~ species,
+                        data = clust_data_pop)
+
+#run model
+clust_model_spp_res_pop <- brm(clust_ind_res ~ species,
+                        data = clust_data_pop, prior = clust_priors_spp_res_pop,
+                chains = 3, iter = 2000, cores = 3)
+
+#extract posteriors
+post_clust_spp_res_pop <- as_draws_df(clust_model_spp_res_pop)
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume clust posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per clusties
+post_clust_spp_move_pop <- post_clust_spp_move_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_clust_spp_move_pop <- post_clust_spp_move_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Movement") #clustify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+post_clust_spp_res_pop <- post_clust_spp_res_pop %>% 
+  mutate(Bison = b_Intercept + b_speciesBison,
+         Elk = b_Intercept + b_speciesElk,
+         `Mule deer` = b_Intercept + b_speciesMuledeer,
+         Pronghorn = b_Intercept + b_speciesPronghorn) %>% 
+  rename(`Bighorn sh.` = b_Intercept)
+
+#then, put data in long format
+ post_clust_spp_res_pop <- post_clust_spp_res_pop %>% 
+  select(`Bighorn sh.`, Bison, Elk, `Mule deer`, Pronghorn) %>% 
+  pivot_longer(1:5) %>% 
+   mutate(type = "Resource") #clustify type of hypervolume
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+clust_pop_spp_post <- rbind(post_clust_spp_move_pop, post_clust_spp_res_pop)
+```
+
+### Seasonal differences within species- population level
+
+```{r}
+#clustering models- seasonal differences within species
+#movement hypervolume models
+spp <- unique(clust_data_pop$species)
+seas_clust_mod_move_pop <- list()
+seas_clust_post_move_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- clust_data_pop %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(clust_ind_move ~ season,
+                        data = dat)
+
+#run model
+seas_clust_mod_move_pop[[i]] <- brm(clust_ind_move ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_clust_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+seas_clust_post_move_pop <- list()
+for(i in 1:length(seas_clust_mod_move_pop)){
+  seas_clust_post_move_pop[[i]] <- as_draws_df(seas_clust_mod_move_pop[[i]])
+  seas_clust_post_move_pop[[i]]$species = spp[i]
+}
+
+seas_clust_post_move_pop <- bind_rows(seas_clust_post_move_pop[1:5])
+
+#resource hypervolume models
+seas_clust_mod_res_pop <- list()
+seas_clust_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- clust_data_pop %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(clust_ind_res ~ season,
+                        data = dat)
+
+#run model
+seas_clust_mod_res_pop[[i]] <- brm(clust_ind_res ~ season,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(seas_clust_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+seas_clust_post_res_pop <- list()
+for(i in 1:length(seas_clust_mod_res_pop)){
+  seas_clust_post_res_pop[[i]] <- as_draws_df(seas_clust_mod_res_pop[[i]])
+  seas_clust_post_res_pop[[i]]$species = spp[i]
+}
+
+seas_clust_post_res_pop <- bind_rows(seas_clust_post_res_pop[1:5])
+```
+
+```{r}
+#reformat and combine movement and resource hypervolume clust posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+seas_clust_post_move_pop <- seas_clust_post_move_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_clust_post_move_pop <- seas_clust_post_move_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per clusties
+seas_clust_post_res_pop <- seas_clust_post_res_pop %>% 
+  mutate(Spring = b_Intercept + b_seasonspring,
+         Summer = b_Intercept + b_seasonsummer,
+         Winter = b_Intercept + b_seasonwinter) %>% 
+  rename(Fall = b_Intercept)
+
+#then, put data in long format
+seas_clust_post_res_pop <- seas_clust_post_res_pop %>% 
+  select(Spring, Summer, Winter, Fall, species) %>% 
+  pivot_longer(1:4) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+clust_pop_seas_post <- rbind(seas_clust_post_move_pop, seas_clust_post_res_pop)
+```
+
+### Yearly differences within species- population level
+
+```{r}
+#clustering models- yearly differences within species
+#movement hypervolume models
+spp <- unique(clust_data_pop$species)
+yr_clust_mod_move_pop <- list()
+yr_clust_post_move_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- clust_data_pop %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(clust_ind_move ~ year,
+                        data = dat)
+
+#run model
+yr_clust_mod_move_pop[[i]] <- brm(clust_ind_move ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_clust_mod_move_pop) <- spp #add spp names
+
+#extract posteriors
+yr_clust_post_move_pop <- list()
+for(i in 1:length(yr_clust_mod_move_pop)){
+  yr_clust_post_move_pop[[i]] <- as_draws_df(yr_clust_mod_move_pop[[i]])
+  yr_clust_post_move_pop[[i]]$species = spp[i]
+}
+
+yr_clust_post_move_pop <- bind_rows(yr_clust_post_move_pop[1:5])
+
+#resource hypervolume models
+yr_clust_mod_res_pop <- list()
+yr_clust_post_res_pop <- list()
+
+for(i in 1:length(spp)){
+  dat <- clust_data_pop %>% filter(species == spp[i])
+  
+  #get priors
+priors <- get_prior(clust_ind_res ~ year,
+                        data = dat)
+
+#run model
+yr_clust_mod_res_pop[[i]] <- brm(clust_ind_res ~ year,
+                        data = dat, prior = priors,
+                chains = 3, iter = 2000, cores = 3)
+}
+
+names(yr_clust_mod_res_pop) <- spp #add spp names
+
+#extract posteriors
+yr_clust_post_res_pop <- list()
+for(i in 1:length(yr_clust_mod_res_pop)){
+  yr_clust_post_res_pop[[i]] <- as_draws_df(yr_clust_mod_res_pop[[i]])
+  yr_clust_post_res_pop[[i]]$species = spp[i]
+}
+
+yr_clust_post_res_pop <- bind_rows(yr_clust_post_res_pop[1:5])
+```
+
+
+```{r}
+#reformat and combine movement and resource hypervolume spec posterior estimates
+#reformat move posteriors
+#first, calculate mean estimates per species
+yr_clust_post_move_pop <- yr_clust_post_move_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_clust_post_move_pop <- yr_clust_post_move_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Movement") #specify type of hypervolume
+ 
+ #reformat res posteriors
+#first, calculate mean estimates per species
+yr_clust_post_res_pop <- yr_clust_post_res_pop %>% 
+  mutate(yr_2016 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept,
+                             species %in% c("Bighorn sh.", "Mule deer", "Pronghorn") ~ NA),
+         yr_2017 = case_when(species %in% c("Bison", "Elk") ~ b_Intercept + b_year2017,
+                             species %in% c("Bighorn sh.", "Mule deer") ~ b_Intercept,
+                             species == "Pronghorn" ~ NA),
+         yr_2018 = case_when(species %in% c("Bison", "Elk", "Bighorn sh.", "Mule deer") ~ b_Intercept + b_year2018,
+                             species == "Pronghorn" ~ b_Intercept),
+        yr_2019 =  b_Intercept + b_year2019,
+        yr_2020 = b_Intercept + b_year2020,
+        yr_2021 = b_Intercept + b_year2021)
+
+#then, put data in long format
+yr_clust_post_res_pop <- yr_clust_post_res_pop %>% 
+  select(yr_2016, yr_2017, yr_2018, yr_2019, yr_2020, yr_2021, species) %>% 
+  pivot_longer(1:6) %>% 
+   mutate(type = "Resource") 
+
+
+#now, combine resource and movement posteriors to one dataset for plotting
+clust_pop_yr_post <- rbind(yr_clust_post_move_pop, yr_clust_post_res_pop)
+```
+
+```{r}
+# save environment for plotting / results
+save.image(file='./hypervolume_metric_bayes_model_environ.RData')
+```

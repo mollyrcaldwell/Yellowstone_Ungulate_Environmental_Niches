@@ -1,0 +1,219 @@
+---
+title: "YNP Ungulates: hypervolume unions"
+author: "Molly Caldwell"
+date: "22 June 2025"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(hypervolume)
+library(paletteer)
+library(furrr)
+library(progressr)
+library(tnet)
+library(parallel)
+```
+
+This code takes hypervolumes from Step 1, and unions them at the population level (union of all hypervolumes per species) and community level (union of all hypervolumes of all species) per season and year. These population and community  unioned hypervolumes will be used to calculate hypervolume metrics in Step 3.
+
+# Population union hypervolumes (per season-year)
+
+```{r}
+# load individual hypervolumes
+# load and combine directories (season-years) of movement and habitat use hypervolumes
+m_files <- list.files("./hypervolume_move_seas", full.names = T)
+move_hv_ls <- list()
+for(i in 1:length(m_files)){
+  print(i)
+  move_hv_ls[[i]] <- to_hv_list(m_files[i])
+}
+
+names(move_hv_ls) <- list.files("./hypervolume_move_seas")
+
+# load and combine directories (season-yers) of resource and space use hypervolumes
+r_files <- list.files("./hypervolume_res_seas/", full.names = T)
+res_hv_ls <- list()
+for(i in 1:length(r_files)){
+  print(i)
+  res_hv_ls[[i]] <- to_hv_list(r_files[i])
+}
+
+names(res_hv_ls) <- list.files("./hypervolume_res_seas/")
+```
+
+```{r}
+# function to extract hypervolumes per species from hypervolume list
+pull_spp_hv <- function(species, hv_list){
+  l <- list()
+  for(i in 1:length(hv_list@HVList)){
+    if(grepl(species, hv_list[[i]]@Name)){
+      l[[i]] <- hv_list[[i]]
+    }
+  }
+  l <- discard(l, is.null) #remove empty parts of list
+  return(l)
+}
+```
+
+```{r}
+# loop hypervolume extract function across species, creating species list of hypervolumes
+spp <- c("bighorn", "bison", "elk", "deer", "pronghorn")
+
+# movement & habitat use hypervolumes
+spp_m_hv <- list()
+
+for(i in 1:length(spp)){
+ temp <- map(move_hv_ls, pull_spp_hv, species = spp[[i]]) 
+ temp <- temp[lengths(temp)>0] # remove seas-years with no individuals
+ spp_m_hv[[i]] <- map(temp, hypervolume_join)
+}
+
+names(spp_m_hv) <- spp
+
+# resource and space use hypervolumes
+spp_r_hv <- list()
+
+for(i in 1:length(spp)){
+ temp <- map(res_hv_ls, pull_spp_hv, species = spp[[i]]) 
+ temp <- temp[lengths(temp)>0] #remove seas-yr with no individuals
+ spp_r_hv[[i]] <- map(temp, hypervolume_join)
+}
+
+names(spp_r_hv) <- spp
+```
+
+```{r}
+# create a unioned movement & habitat use hypervolume per species per season-year 
+plan(multisession(workers = availableCores()-1))#set parallel processing
+
+#remove fall and winter 2019 for pronghorn (only 1 indiv)
+spp_m_hv[[5]][["fall_2019"]] <- NULL
+spp_m_hv[[5]][["winter_2019"]] <- NULL
+
+pop_union_mhv <- list()
+for(i in 1:length(spp_m_hv)){
+  print(i)
+  pop_union_mhv[[i]] <- future_map(spp_m_hv[[i]], hypervolume_n_occupancy,
+                                   .options = furrr_options(seed = TRUE))
+}
+names(pop_union_mhv) <- names(spp_m_hv)
+
+plan(sequential) #stop parallel processing
+remove(move_hv_ls)
+
+#create a population unioned resource & space use hypervolume per species per seas-yr
+#remove fall and winter 2019 for pronghorn (only 1 indiv)
+spp_r_hv[[5]][["fall_2019"]] <- NULL
+spp_r_hv[[5]][["winter_2019"]] <- NULL
+
+plan(multisession(workers = availableCores()-1))#set parallel processing
+
+pop_union_rhv <- list()
+for(i in 1:length(spp_r_hv)){
+  print(i)
+  pop_union_rhv[[i]] <- future_map(spp_r_hv[[i]], hypervolume_n_occupancy, 
+                                   .options = furrr_options(seed = TRUE))
+}
+names(pop_union_rhv) <- names(spp_r_hv)
+
+plan(sequential) #stop parallel processing
+remove(res_hv_ls)
+
+#save seasonal union pop hypervolumes
+saveRDS(pop_union_mhv, "./seas_population_union_move_hv.rds")
+
+saveRDS(pop_union_rhv, "./seas_population_union_res_hv.rds")
+```
+
+# Community union hypervolumes (per season-year)
+
+```{r}
+#load population union hypervolumes
+pop_union_mhv <- readRDS("./seas_population_union_move_hv.rds")
+pop_union_rhv <- readRDS("./seas_population_union_res_hv.rds")
+```
+
+```{r}
+#combine species population hypervolumes within same seas-yr into a hypervolume list
+#movement hypervolumes
+#season-yr vector to loop over
+syr <- names(pop_union_mhv[["bison"]])
+
+#species vector to loop over
+spp <- c("bighorn", "bison", "elk", "deer", "pronghorn")
+
+#list to save to
+move_hvls_spp <- vector(mode = "list", length = length(syr))
+
+for(i in 1:length(syr)){
+  for(j in 1:length(spp)){
+    print(paste0("i: ", i, " j: ", j))
+    tl <- pop_union_mhv[[spp[j]]][[syr[i]]]
+    
+    if(length(tl) > 0){
+      move_hvls_spp[[i]][[spp[j]]] <- tl
+    }
+  }
+}
+
+#convert each list item to hypervolume list object
+for(i in 1:length(move_hvls_spp)){
+  move_hvls_spp[[i]] <- hypervolume_join(move_hvls_spp[[i]])
+}
+
+names(move_hvls_spp) <- syr
+
+#resource hypervolumes
+#list to save to
+res_hvls_spp <- vector(mode = "list", length = length(syr))
+
+for(i in 1:length(syr)){
+  for(j in 1:length(spp)){
+    print(paste0("i: ", i, " j: ", j))
+    tl <- pop_union_rhv[[spp[j]]][[syr[i]]]
+    
+    if(length(tl) > 0){
+      res_hvls_spp[[i]][[spp[j]]] <- tl
+    }
+  }
+}
+
+#convert each list item to hypervolume list object
+for(i in 1:length(res_hvls_spp)){
+  res_hvls_spp[[i]] <- hypervolume_join(res_hvls_spp[[i]])
+}
+
+names(res_hvls_spp) <- syr
+
+```
+
+
+```{r}
+#now, union species hypervolumes per season to create community-level hypervolume
+#movement hypervolumes
+comm_union_mhv <- vector(mode = "list", length = length(syr))
+
+for(i in 1:length(move_hvls_spp)){
+  print(i)
+comm_union_mhv[[i]] <- hypervolume_n_occupancy(move_hvls_spp[[i]])
+}
+
+names(comm_union_mhv) <- syr
+
+#resource hypervolumes
+comm_union_rhv <- vector(mode = "list", length = length(syr))
+
+for(i in 1:length(res_hvls_spp)){
+  print(i)
+comm_union_rhv[[i]] <- hypervolume_n_occupancy(res_hvls_spp[[i]])
+}
+
+names(comm_union_rhv) <- syr
+
+#save community unioned hypervolumes
+saveRDS(comm_union_mhv, "./community_union_move_hypervolumes.rds")
+
+saveRDS(comm_union_rhv, "./community_union_res_hypervolumes.rds")
+```
+

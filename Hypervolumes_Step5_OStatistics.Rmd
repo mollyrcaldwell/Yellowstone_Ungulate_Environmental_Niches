@@ -1,0 +1,211 @@
+---
+title: "YNP Ungulates: hypervolume o-statistics"
+author: "Molly Caldwell"
+date: "22 June 2025"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(hypervolume)
+library(Ostats)
+library(ggpubr)
+```
+
+# Load hypervolume variable data
+
+```{r}
+# this is the input hypervolume data file that is scaled, centered and subsampled for hypervolume calculations; download from https://doi.org/10.5061/dryad.d2547d8cm
+phen_pt <- read.csv("./YNP_Ungulate_Hypervolume_Input_Data.csv")
+
+# add season-year variable
+phen_pt <- phen_pt %>% 
+  mutate(seas_yr = paste(season, yr, sep = "_"))
+```
+
+# Calculate community-level Ostats
+
+```{r}
+# per season-year (because seasons have different axes)
+sy_uniq <- unique(phen_pt$seas_yr)
+
+#movement hvs
+ostats_move <- list()
+  
+for(i in 1:length(sy_uniq)){
+  print(i)
+  dat <- phen_pt %>% filter(seas_yr == sy_uniq[[i]])
+  
+  #do separate ostats for winter (has snowdepth axis)
+  if(grepl("winter", sy_uniq[[i]])){
+    ostats_move[[i]] <- Ostats(traits = as.matrix(dat[, c("speed", "displ_24hr",
+                                                          "elev", "slope",
+                                                          "perc_treecov",
+                                                          "snowdepth"), drop = FALSE]),
+                    sp = factor(dat$species),
+                     plots = factor(rep(1, nrow(dat))),
+                    random_seed = 518,
+                    run_null_model = FALSE)
+  }else{
+    ostats_move[[i]] <- Ostats(traits = as.matrix(dat[, c("speed", "displ_24hr",
+                                                          "elev", "slope",
+                                                          "perc_treecov"), drop = FALSE]),
+                    sp = factor(dat$species),
+                    plots = factor(rep(1, nrow(dat))),
+                    random_seed = 518,
+                    run_null_model = FALSE)
+  }
+}
+
+#resource hvs
+ostats_res <- list()
+  
+for(i in 1:length(sy_uniq)){
+  print(i)
+  dat <- phen_pt %>% filter(seas_yr == sy_uniq[[i]])
+  
+  #do separate ostats for spring & summer (have IRG and NDVI axes)
+  if(grepl("spring", sy_uniq[[i]]) | grepl("summer", sy_uniq[[i]])){
+    ostats_res[[i]] <- Ostats(traits = as.matrix(dat[, c("forbgrass_biomass",
+                                                          "long", "lat",
+                                                          "IRGVals", "NDVIVals"),
+                                                      drop = FALSE]),
+                    sp = factor(dat$species),
+                     plots = factor(rep(1, nrow(dat))),
+                    random_seed = 518,
+                    run_null_model = FALSE)
+  }else{
+    ostats_res[[i]] <- Ostats(traits = as.matrix(dat[, c("forbgrass_biomass",
+                                                          "long", "lat"), 
+                                                      drop = FALSE]),
+                    sp = factor(dat$species),
+                    plots = factor(rep(1, nrow(dat))),
+                    random_seed = 518,
+                    run_null_model = FALSE)
+  }
+}
+
+```
+
+```{r}
+# organize ostats into data frame
+os_m <- list()
+os_r <- list()
+
+for(i in 1:length(sy_uniq)){
+  df_m <- pivot_longer(data.frame(as.list(ostats_move[[i]][1])), 
+                       cols = everything())
+  
+  df_m$seas_yr <- sy_uniq[[i]]
+  
+  df_r <- pivot_longer(data.frame(as.list(ostats_res[[i]][1])), 
+                       cols = everything())
+               
+  df_r$seas_yr <- sy_uniq[[i]]
+  
+  os_m[[i]] <- df_m
+  os_r[[i]] <- df_r
+}
+
+os_m <- bind_rows(os_m)
+os_r <- bind_rows(os_r)
+
+os_m$hv_type <- "Movement"
+os_r$hv_type <- "Resource"
+
+ostats_df <- bind_rows(os_m, os_r)
+
+ostats_df <- ostats_df %>% 
+  mutate(name = str_replace(name, "overlaps_norm.", ""),
+         name = case_when(
+           name == "NDVIVals" ~ "NDVI values",
+           name == "IRGVals" ~ "IRG values",
+           name == "forbgrass_biomass" ~ "Forb & grass biomass",
+           name == "long" ~ "Longitude",
+           name == "lat" ~ "Latitude",
+           name == "speed" ~ "Speed",
+           name == "displ_24hr" ~ "Displacement",
+           name == "snowdepth" ~ "Snow depth",
+           name == "slope" ~ "Slope",
+           name == "perc_treecov" ~ "Tree cover",
+           name == "elev" ~ "Elevation"
+         ),
+         name = factor(name, levels = c("Speed", "Displacement",
+                                        "Elevation", "Slope",
+                                        "Tree cover", "Snow depth",
+                                        "Longitude", "Latitude",
+                                        "Forb & grass biomass", "NDVI values",
+                                        "IRG values"), ordered = T),
+         season = str_split_i(seas_yr, "_", 1),
+         season = case_when(
+           season == "spring" ~ "Spring",
+           season == "fall" ~ "Fall",
+           season == "winter" ~ "Winter",
+           season == "summer" ~ "Summer"
+         ),
+         season = factor(season, levels = c("Spring", "Summer",
+                                            "Fall", "Winter"), ordered = T))
+```
+
+# Plot results
+
+```{r}
+os_plot_m <- ggplot(data = ostats_df %>% filter(hv_type == "Movement"),
+                    aes(x = name, y = value)) +
+  geom_violin(fill = "grey90", color = "grey50") +
+  stat_summary(fun = "mean",
+               geom = "point", 
+               size = 1.5,
+               colour = "firebrick") +
+  labs(x = "", y = "O-statistic", subtitle = "a. Movement") +
+  coord_flip() + 
+  facet_wrap(~season, ncol = 1, strip.position = "left", scales = "free") +
+    scale_y_continuous(breaks = c(0, 0.5, 1.0), limits = c(0, 1)) +
+   theme(text = element_text(family = "Arial", size = 10),
+        legend.spacing.y = unit(0.2, "cm"),
+        legend.spacing.x = unit(0.3, "cm")) +
+  theme(axis.line = element_line(),
+        panel.background = element_rect(fill = NA),
+        legend.position = "none",
+        legend.text = element_text(family = "Arial", size = 10),
+        axis.text.x = element_text(family = "Arial", size = 10),
+        axis.text.y = element_text(family = "Arial", size = 10),
+        plot.margin = margin(0.4, 0, 0, 0, "cm"),
+        strip.background = element_blank(),
+        strip.placement = "outside",
+        strip.text = element_text(family = "Arial", size = 12, face = "bold"),
+        plot.subtitle = element_text(family = "Arial", size = 12, face = "bold"))
+
+os_plot_r <- ggplot(data = ostats_df %>% filter(hv_type == "Resource"),
+                    aes(x = name, y = value)) +
+  geom_violin(fill = "grey90", color = "grey50") +
+  stat_summary(fun = "mean",
+               geom = "point", 
+               size = 1.5,
+               colour = "firebrick") +
+  labs(x = "", y = "O-statistic", subtitle = "b. Resource") +
+  coord_flip() + 
+  facet_wrap(~season, ncol = 1, strip.position = "left", scales = "free") +
+    scale_y_continuous(breaks = c(0, 0.5, 1.0), limits = c(0, 1)) +
+   theme(text = element_text(family = "Arial", size = 10),
+        legend.spacing.y = unit(0.2, "cm"),
+        legend.spacing.x = unit(0.3, "cm")) +
+  theme(axis.line = element_line(),
+        panel.background = element_rect(fill = NA),
+        legend.position = "none",
+        legend.text = element_text(family = "Arial", size = 10),
+        axis.text.x = element_text(family = "Arial", size = 10),
+        axis.text.y = element_text(family = "Arial", size = 10),
+        plot.margin = margin(0.4, 0, 0, 0, "cm"),
+        strip.background = element_blank(),
+        strip.text = element_blank(),
+        plot.subtitle = element_text(family = "Arial", size = 12, face = "bold"))
+
+ostats_plots <- ggarrange(os_plot_m, os_plot_r,
+                          ncol = 2)
+
+ostats_plots
+```
+
+
+

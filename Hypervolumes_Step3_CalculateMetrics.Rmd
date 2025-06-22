@@ -1,0 +1,298 @@
+---
+title: "YNP Ungulates: calculate hypervolume metrics"
+author: "Molly Caldwell"
+date: "22 June 2025"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(hypervolume)
+library(paletteer)
+library(furrr)
+library(progressr)
+library(tnet)
+library(parallel)
+```
+
+This code uses individual (per animal), population (unioned per species, season and year), and community (unioned across all species per season and year) hypervolume volumes previously extracted for the YNP ungulates. It is available to download from https://doi.org/10.5061/dryad.d2547d8cm
+
+If you would like to use your own hypervolume volumes, you can extract the volumes by using @Volume on any hypervolumes loaded into your R environment and then save these into a dataframe for calculating the indices below.
+
+# Load in volume data
+
+```{r}
+#load individual hypervolume data
+ind_hv_data <- readRDS("./indiv_hypervolume_data.rds")
+
+# add seas_yr
+ind_hv_data <- ind_hv_data %>% 
+  mutate(seas_yr = paste(season, year, sep = "_"))
+
+# load population hypervolume data
+pop_hv_data <- readRDS("./population_union_hypervolume_data_seasyr.rds")
+
+# load community hypervolume data
+comm_hv_data <- readRDS("./community_union_hypervolume_data_seasyr.rds")
+```
+
+# Specialization index
+
+## Population level (within species)
+
+```{r}
+# join individual and population hypervolume data
+spec_pop <- left_join(ind_hv_data, pop_hv_data, by = c("seas_yr", "species"))
+
+# add specialization index per individual move and resource hypervolume
+spec_pop <- spec_pop %>% 
+  mutate(across(contains("vol"), as.numeric)) %>% 
+  mutate(spec_ind_move = 1 - (move_vol/pop_move_vol),
+         spec_ind_res = 1 - (res_vol/pop_res_vol))
+
+# check for NAs- there are two pronghorn that were removed because there was only one pronghorn per those seasons
+spec_na <- spec_pop %>% filter(is.na(spec_ind_move) | is.na(spec_ind_res))
+
+# remove NAs
+spec_pop <- spec_pop %>% 
+  filter(!is.na(spec_ind_move))
+
+# check range of specialization values
+range(spec_pop$spec_ind_move) 
+range(spec_pop$spec_ind_res) 
+
+# check negatives- these are from pop hypervolumes with few individuals, and subsampling to create unions makes a slightly smaller hypervolume than the biggest individual's hypervolume, when the others are nested inside
+spec_neg <- spec_pop %>% 
+  filter(spec_ind_move < 0 | spec_ind_res < 0)
+
+# set negatives to 0 (specialization has to be between 0 - 1)
+spec_pop <- spec_pop %>% 
+  mutate(spec_ind_move = if_else(spec_ind_move < 0, 0, spec_ind_move),
+         spec_ind_res = if_else(spec_ind_res < 0, 0, spec_ind_res))
+```
+
+## Community level (across species)
+
+```{r}
+# join individual and community hypervolume data
+spec_comm <- left_join(ind_hv_data, comm_hv_data, by = c("seas_yr"))
+
+# add specialization index per individual move and resource hypervolumes
+spec_comm <- spec_comm %>% 
+  mutate(across(contains("vol"), as.numeric)) %>% 
+  mutate(spec_ind_move = 1 - (move_vol/comm_move_vol),
+         spec_ind_res = 1 - (res_vol/comm_res_vol))
+
+# check for NAs
+spec_na <- spec_comm %>% filter(is.na(spec_ind_move) | is.na(spec_ind_res))
+
+# check range (should be between 0 - 1)
+range(spec_comm$spec_ind_move) 
+range(spec_comm$spec_ind_res) 
+```
+
+```{r}
+# combine population and community and save specialization index data
+# first, rename spec ind to differentiate between pop and comm
+spec_comm <- spec_comm %>% 
+  rename(spec_move_comm = spec_ind_move, spec_res_comm = spec_ind_res) %>% 
+  select(id_yr_seas, spec_move_comm, spec_res_comm)
+
+spec_pop <- spec_pop %>% 
+  rename(spec_move_pop = spec_ind_move, spec_res_pop = spec_ind_res)
+
+# join together pop and community data
+spec_ind <- left_join(spec_pop, spec_comm, by = c("id_yr_seas"))
+
+# rename species to full names
+spec_ind <- spec_ind %>% 
+  mutate(species = case_when(species == "BH" ~ "Bighorn sh.",
+                             species == "BI" ~ "Bison",
+                             species == "MD" ~ "Mule deer",
+                             species == "EL" ~ "Elk",
+                             species == "PR" ~ "Pronghorn"))
+
+# save
+saveRDS(spec_ind, "./individual_specialization_indices.rds")
+```
+
+# Nestedness index
+
+```{r}
+# load overlap metrics data from hypervolume code Step 1
+ol_move <- readRDS("./move_hv_ol.rds")
+ol_res <- readRDS("./res_hv_ol.rds")
+
+#combine move and res metrics
+ol_move$type <- "move"
+ol_res$type <- "res"
+
+ol_metrics <- bind_rows(ol_move, ol_res)
+
+# add species
+ol_metrics <- ol_metrics %>% 
+  mutate(species = str_split_i(id1, "_", 1),
+         species2 = str_split_i(id2, "_", 1),
+         species = case_when(species == "bighorn" ~ "Bighorn sh.",
+                             species == "bison" ~ "Bison",
+                             species == "deer" ~ "Mule deer",
+                             species == "elk" ~ "Elk",
+                             species == "pronghorn" ~ "Pronghorn"),
+         species2 = case_when(species2 == "bighorn" ~ "Bighorn sh.",
+                             species2 == "bison" ~ "Bison",
+                             species2 == "deer" ~ "Mule deer",
+                             species2 == "elk" ~ "Elk",
+                             species2 == "pronghorn" ~ "Pronghorn"))
+
+
+
+#remove overlap that's zero
+ol_metrics_nz <- ol_metrics %>% filter(intersec > 0)
+```
+
+```{r}
+# calculate nestedness within population (i.e., per species)
+pop_ni <- ol_metrics_nz %>% 
+  filter(species == species2) %>% 
+  rowwise() %>% 
+  mutate(NI_pop = intersec/min(vol1, vol2))
+```
+
+```{r}
+# calculate nestedness across community (i.e., across all species)
+comm_ni <- ol_metrics_nz %>% 
+  rowwise() %>% 
+  mutate(NI_comm = intersec/min(vol1, vol2))
+```
+
+```{r}
+# save community and population nestedness data
+saveRDS(pop_ni, "./population_nestedness.rds")
+saveRDS(comm_ni, "~./community_nestedness.rds")
+```
+
+# Weighted global clustering index & degree modularity
+
+## Community level 
+(all species combined per season-year)
+
+```{r}
+#empty dataframe to save results
+clust_df <- data.frame(type = "NA", species = "NA", season = "NA", year = "NA", 
+                       clust_ind_move = "NA", clust_ind_res = "NA")
+
+# add and pull season year from ol metrics
+ol_metrics <- ol_metrics %>% 
+  mutate(seas_yr = paste(str_split_i(id1, "_", 3),
+                         str_split_i(id1, "_", 4),
+                         sep = "_"))
+
+syr <- unique(ol_metrics$seas_yr)
+
+#loop per season year
+for(i in 1:length(syr)){
+print(i)
+  #sample season-yr from ol metric data
+tn_df_m <- ol_metrics %>% filter(seas_yr == syr[i], type == "move") %>% 
+  select(id1, id2, jac_ind) 
+
+tn_df_r <- ol_metrics %>% filter(seas_yr == syr[i], type == "res") %>% 
+  select(id1, id2, jac_ind) 
+
+#set id1 and id2 to be integers (with same values for same ids)
+id_levels_m <- levels(as.factor(c(tn_df_m$id1, tn_df_m$id2)))
+id_levels_r <- levels(as.factor(c(tn_df_r$id1, tn_df_r$id2)))
+
+#set as numeric with same levels across id1 and id2
+tn_df_m <- tn_df_m %>% 
+  mutate(id1_n = as.numeric(factor(id1, levels = id_levels_m)),
+         id2_n = as.numeric(factor(id2, levels = id_levels_m)))
+
+tn_df_r <- tn_df_r %>% 
+  mutate(id1_n = as.numeric(factor(id1, levels = id_levels_r)),
+         id2_n = as.numeric(factor(id2, levels = id_levels_r)))
+
+#convert to network object, one for move and one for res
+tn_move <- as.tnet(tn_df_m %>% select(id1_n, id2_n, jac_ind))
+tn_res <- as.tnet(tn_df_r %>% select(id1_n, id2_n, jac_ind))
+
+#calculate centrality
+cent_move <- clustering_w(tn_move)
+cent_res <- clustering_w(tn_res)
+
+#add to dataframe
+df <- c(type = "comm", species = "NA", season = str_split(syr[i], "_")[[1]][1],
+        year = str_split(syr[i], "_")[[1]][2], clust_ind_move = cent_move[[1]],
+        clust_ind_res = cent_res[[1]])
+
+clust_df <- bind_rows(df, clust_df)
+
+}
+
+# remove NA row 
+clust_df <- clust_df %>% 
+  filter(clust_ind_move != "NA")
+```
+
+## Population level 
+(per species per season-year)
+
+```{r}
+#create species vector to loop over
+spp <- unique(ol_metrics$species)
+
+#loop per season year
+for(i in 1:length(syr)){
+
+  #loop per species
+  for(j in 1:length(spp)){
+ print(paste0("i: ", i, " j: ", j))
+    
+     #sample season-yr and species (same spp1 and spp2) from overlap data
+tn_df_m <- ol_metrics %>% filter(seas_yr == syr[i] & species == spp[j]
+                            & species2 == spp[j] & type == "move") %>% 
+  select(id1, id2, jac_ind) 
+
+tn_df_r <- ol_metrics %>% filter(seas_yr == syr[i] & species == spp[j]
+                            & species2 == spp[j] & type == "res") %>% 
+  select(id1, id2, jac_ind) 
+
+#set id1 and id2 to be integers (with same values for same ids)
+id_levels_m <- levels(as.factor(c(tn_df_m$id1, tn_df_m$id2)))
+id_levels_r <- levels(as.factor(c(tn_df_r$id1, tn_df_r$id2)))
+
+#set as numeric with same levels across id1 and id2
+tn_df_m <- tn_df_m %>% 
+  mutate(id1_n = as.numeric(factor(id1, levels = id_levels_m)),
+         id2_n = as.numeric(factor(id2, levels = id_levels_m)))
+
+ tn_df_r <- tn_df_r %>% 
+  mutate(id1_n = as.numeric(factor(id1, levels = id_levels_r)),
+         id2_n = as.numeric(factor(id2, levels = id_levels_r)))
+
+#convert to network object, one for move and one for res
+tn_move <- as.tnet(tn_df_m %>% select(id1_n, id2_n, jac_ind))
+tn_res <- as.tnet(tn_df_r %>% select(id1_n, id2_n, jac_ind))
+
+if(nrow(tn_move) > 2 & nrow(tn_res) > 2){
+#calculate centrality
+cent_move <- clustering_w(tn_move)
+cent_res <- clustering_w(tn_res)
+
+#add to dataframe
+df <- c(type = "pop", species = spp[j], season = str_split(syr[i], "_")[[1]][1],
+        year = str_split(syr[i], "_")[[1]][2], clust_ind_move = cent_move[[1]],
+        clust_ind_res = cent_res[[1]])
+
+clust_df <- bind_rows(df, clust_df)
+}
+#remove temp objects
+rm(df, tn_df) 
+}
+}
+```
+
+```{r}
+# save clustering metrics
+saveRDS(clust_df, "./clustering_metrics.rds")
+```

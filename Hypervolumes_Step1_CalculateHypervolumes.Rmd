@@ -1,0 +1,345 @@
+---
+title: "YNP Ungulates: calculate hypervolumes"
+author: "Molly Caldwell"
+date: "22 June 2025"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(hypervolume)
+library(parallel)
+library(future)
+library(doFuture)
+library(furrr)
+library(progressr)
+```
+
+# Prep hypervolume input data
+
+```{r}
+# load hypervolume input data (download from https://doi.org/10.5061/dryad.d2547d8cm)
+# this dataset has the scaled & centered variables for hypervolumes described in Caldwell et al. 2025
+phen_pt <- read.csv("./YNP_Ungulate_Hypervolume_Input_Data.csv")
+
+# add an species - animal id - year - season variable and a season - year variable
+phen_pt <- phen_pt %>% 
+  mutate(id_yr_seas = paste(species, animal_id, season, yr, sep = "_"),
+         seas_yr = paste(season, yr, sep = "_"))
+```
+
+# Hypervolume functions
+
+```{r}
+# functions to use iteratively to calculate hypervolumes and pairwise overlap
+
+# function to create hypervolume per individual 
+# returns a .rds file of each individual's hypervolume per season and year
+create_hypervolume <- function(data, name, filename, seas_yr){
+    #reduce dataset and bw to only numeric phenotypes (exclude ids, season-yrs)
+  data <- data %>% select_if(is.numeric)
+  
+  # estimate bandwith using silverman estimator
+  bw <- estimate_bandwidth(data)
+  
+  # adjust bandwith to 1e-2 if too small (less than 1e-2)
+  if(any(bw < 1e-2)){
+    for (i in 1:length(bw)) {
+  if (bw[i] < 1e-2) {
+    bw[i] <- 1e-2
+  }
+    }
+    
+    # need to manually set bandwith
+    bw <- estimate_bandwidth(data, method = "fixed", value = bw)
+  }
+  
+    # calculate hypervolume and save as RDS
+    hv <- hypervolume_gaussian(data, name = name,
+                                  kde.bandwidth = bw, 
+                                  quantile.requested = 0.9)
+    
+    saveRDS(hv, paste0(filename, seas_yr, "/", name, ".rds"))
+}
+```
+
+```{r}
+# function to calculate pairwise hypervolume overlap metrics
+# returns a dataframe of extracted metrics including IDs of both hypervolumes, volumes of hypervolumes, intersection volume, union volume, and Jaccard indices
+
+calc_hypervolume_overlap <- function(hv1, hv2){
+  # calculate hypervolume overlap 
+  hv_ol <- hypervolume_set(hv1, hv2, check.memory = F, 
+                           num.points.max = 10000)
+  
+  # extract metrics
+  id1 = hv1@Name
+  id2 = hv2@Name
+  vol1 = hv1@Volume
+  vol2 = hv2@Volume
+  intersec = hv_ol@HVList$Intersection@Volume
+  union = hv_ol@HVList$Union@Volume
+  jac_ind = hv_ol@HVList$Intersection@Volume / hv_ol@HVList$Union@Volume
+  
+  #combine metrics to a data frame
+  df <- data.frame(id1, id2, vol1, vol2, intersec, union, jac_ind)
+  
+ #return data frame
+  return(df)
+}
+```
+
+# Movement and habitat use hypervolumes
+
+```{r}
+# first create a list of animal's movement & habitat use variables per season-year
+# ALL seasons have speed, 24 hr displacement, elevation, slope, percent tree cover
+# Winter has snow depth
+
+## winter data
+w_move_phen <- phen_pt %>%
+  filter(season == "winter") %>%
+  select(c(speed, displ_24hr, elev, slope, perc_treecov, snowdepth, seas_yr, id_yr_seas))
+
+w_mphen_list <- split(w_move_phen, w_move_phen$seas_yr)
+w_mphen_list <- map(w_mphen_list, function(x) split(x, x$id_yr_seas))
+
+## all other seasons' data
+move_phen <- phen_pt %>% 
+  filter(season != "winter") %>% 
+  select(c(speed, displ_24hr, elev, slope, perc_treecov, seas_yr, id_yr_seas))
+
+mphen_list <- split(move_phen, move_phen$seas_yr)
+mphen_list <- map(mphen_list, function(x) split(x, x$id_yr_seas))
+
+# combine all seasons
+mphen_list <- c(mphen_list, w_mphen_list)
+
+# remove unneeded objects from environment
+rm(list = c("w_move_phen", "w_mphen_list", "move_phen"))
+```
+
+```{r}
+# create and save movement & habitat use hypervolumes
+## first, setup parallel procesing
+plan(multisession(workers = availableCores()-2))
+options(future.globals.maxSize = 1000000*1024^2)
+
+## set file location to save hypervolumes
+filename_hv <- "./hypervolume_move_seas/"
+
+# for each seas-year, iterate over the hypervolume function
+for(i in 1:length(mphen_list)){
+  print(paste0("move hv: ", i))
+  
+  seas_yr_c <- names(mphen_list)[[i]] # pull season yr
+  name <- names(mphen_list[[i]]) # pull id_seas_yrs
+  
+  # create directory to save hypervolume to
+  dir.create(paste0(filename_hv, seas_yr_c))
+  
+  # create individual hypervolumes
+  with_progress({
+  p <- progressor(steps = length(mphen_list[[i]]))
+  
+  future_map2(mphen_list[[i]], name, ~{
+    p()
+    create_hypervolume(.x, .y, filename = filename_hv, seas_yr = seas_yr_c)
+    gc()
+  }, .options = furrr_options(seed = TRUE))
+})
+  
+  remove(name, seas_yr_c) # remove temporary objects
+}
+
+plan(sequential)
+
+```
+
+```{r}
+# create and save pairwise hypervolume overlap metrics
+seas_yr_s <- names(mphen_list) # pull season-year names
+filename_hv <- "./hypervolume_move_seas/" # set to filepath where movement hypervolumes are saved
+hv_ol_1 <- list() # empty lists to save to
+hv_ol_2 <- list()
+
+# start parallel session
+plan(multisession(workers = availableCores()-2))
+options(future.globals.maxSize = 1000000*1024^2)
+
+# iterate over season-years
+for(i in 1:length(seas_yr_s)){
+  print(paste0("move hv ol: ", i))
+#load previously made hypervolumes
+hv_list <- to_hv_list(paste0(filename_hv, seas_yr_s[[i]], "/"))
+
+#create index of all pairwise combinations
+comb_id <- combn(1:length(hv_list@HVList), m = 2)
+
+#create list of first hv combination
+list1 <- hv_list@HVList[comb_id[1, ]]
+list2 <- hv_list@HVList[comb_id[2, ]]
+
+# iterate hypervolume overlap over each pair
+hv_ol_1[[i]] <- with_progress({
+  p <- progressor(steps = length(list1))
+  
+  future_map2(list1, list2, ~{
+    p()
+    calc_hypervolume_overlap(.x, .y)
+  }, .options = furrr_options(seed = TRUE))
+})
+
+hv_ol_2[[i]] <- with_progress({
+  p <- progressor(steps = length(list1))
+  
+  future_map2(list2, list1, ~{
+    p()
+    calc_hypervolume_overlap(.x, .y)
+  }, .options = furrr_options(seed = TRUE))
+})
+
+remove(list1, list2, comb_id) # remove temporary objects
+}
+
+plan(sequential) # stop parallel processing
+
+# combine overlap data
+hv_ol_1 <- bind_rows(hv_ol_1) 
+hv_ol_2 <- bind_rows(hv_ol_2)
+hv_ol <- bind_rows(hv_ol_1, hv_ol_2)
+
+# save overlap data
+saveRDS(hv_ol, "./move_hv_ol.rds")
+```
+
+```{r}
+# clear environment except phenotype data and functions
+rm(list = setdiff(ls(), c("phen_pt", "create_hypervolume",
+                          "calc_hypervolume_overlap")))
+```
+
+# Resource & space use hypervolumes
+
+```{r}
+# prep data to make resource & space use hypervolumes
+# first create a list of animal's resource & space use variables per season-year
+# ALL seasons have forbgrass biomass, long, lat
+# Summer and spring have NDVI, IRG
+
+## summer and spring data
+s_res_phen <- phen_pt %>%  
+  filter(season %in% c("spring", "summer")) %>% 
+  dplyr::select(c(forbgrass_biomass, long, lat, IRGVals, NDVIVals, seas_yr, id_yr_seas))
+
+s_list <- split(s_res_phen, s_res_phen$seas_yr)
+s_list <- map(s_list, function(x) split(x, x$id_yr_seas))
+
+# winter and fall data
+res_phen <- phen_pt %>%  
+  filter(season %in% c("winter", "fall")) %>% 
+  dplyr::select(c(forbgrass_biomass, long, lat, seas_yr, id_yr_seas)) 
+
+rphen_list <- split(res_phen, res_phen$seas_yr)
+rphen_list <- map(rphen_list, function(x) split(x, x$id_yr_seas))
+
+# combine all seasons
+rphen_list <- c(rphen_list, s_list)
+
+# remove unneeded objects
+rm(list = c("s_list", "s_res_phen", "res_phen"))
+```
+
+```{r}
+# create and save resource & space use hypervolumes
+
+## first, setup parallel session
+plan(multisession(workers = availableCores()-2))
+options(future.globals.maxSize = 1000000*1024^2)
+
+# set folder location to save hypervolumes
+filename_hv <- "./hypervolume_res_seas/"
+
+# now, iterate create hypervolume function per season - year
+for(i in 1:length(rphen_list)){
+  print(paste0("res hv: ", i))
+  
+  seas_yr_c <- names(rphen_list)[[i]] # pull season yr
+  name <- names(rphen_list[[i]]) # pull id_seas_yrs
+  
+  # create directory to save hypervolumes to
+  dir.create(paste0(filename_hv, seas_yr_c))
+  
+  # create individual hypervolumes
+  with_progress({
+  p <- progressor(steps = length(rphen_list[[i]]))
+  
+  future_map2(rphen_list[[i]], name, ~{
+    p()
+    create_hypervolume(.x, .y, filename = filename_hv, seas_yr = seas_yr_c)
+    gc()
+  }, .options = furrr_options(seed = TRUE))
+})
+  
+  remove(name, seas_yr_c) # remove temporary objects
+}
+
+plan(sequential) # stop parallel processing
+```
+
+```{r}
+# create and save pairwise resource & space use hypervolume overlap
+seas_yr_s <- names(rphen_list) # pull season-year names
+filename_hv <- "./hypervolume_res_seas/" # set to where hypervolumes are saved
+hv_ol_1 <- list() # empty lists to save to
+hv_ol_2 <- list()
+
+## setup parallel processing
+plan(multisession(workers = availableCores()-2))
+options(future.globals.maxSize = 1000000*1024^2)
+
+## iterate hypervolume overlap function over season-years
+for(i in 1:length(seas_yr_s)){
+  print(paste0("res hv ol: ", i))
+# load previously made hypervolumes
+hv_list <- to_hv_list(paste0(filename_hv, seas_yr_s[[i]], "/"))
+
+# create index of all pairwise combinations
+comb_id <- combn(1:length(hv_list@HVList), m = 2)
+
+# create lists of hypervolume combinations
+list1 <- hv_list@HVList[comb_id[1, ]]
+list2 <- hv_list@HVList[comb_id[2, ]]
+
+# iterate hypervolume overlap over each pair
+hv_ol_1[[i]] <- with_progress({
+  p <- progressor(steps = length(list1))
+  
+  future_map2(list1, list2, ~{
+    p()
+    calc_hypervolume_overlap(.x, .y)
+  }, .options = furrr_options(seed = TRUE))
+})
+
+hv_ol_2[[i]] <- with_progress({
+  p <- progressor(steps = length(list1))
+  
+  future_map2(list2, list1, ~{
+    p()
+    calc_hypervolume_overlap(.x, .y)
+  }, .options = furrr_options(seed = TRUE))
+})
+
+remove(list1, list2, comb_id) # remove temporary objects
+}
+
+plan(sequential) # end parallel processing
+
+# combine overlap data
+hv_ol_1 <- bind_rows(hv_ol_1) 
+hv_ol_2 <- bind_rows(hv_ol_2)
+hv_ol <- bind_rows(hv_ol_1, hv_ol_2)
+
+# save overlap data
+saveRDS(hv_ol, "./res_hv_ol.rds")
+```
